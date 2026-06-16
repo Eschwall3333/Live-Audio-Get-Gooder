@@ -1,22 +1,17 @@
 export class ChannelNodeGroup {
     constructor(ctx) {
-      this.ctx = ctx;
-      this.isPhaseInverted = false;
-      this.currentGaindB = 0;
+      this.ctx = ctx; this.isPhaseInverted = false; this.currentGaindB = 0;
       this.trackBuffer = null; this.trackSource = null; this.isPlaying = false; this.playOffset = 0; this.lastPlayTime = 0;
   
-      // DCA Math State
+      // --- GAIN MATH STATE ---
       this.baseFaderDb = 0;
       this.assignedDcas = [];
+      this.assignedMuteGroups = [];
   
-      this.inputNode = ctx.createGain();
-      this.hpfNode = ctx.createBiquadFilter();
-      this.gateNode = new AudioWorkletNode(ctx, 'noise-gate-processor');
+      this.inputNode = ctx.createGain(); this.hpfNode = ctx.createBiquadFilter(); this.gateNode = new AudioWorkletNode(ctx, 'noise-gate-processor');
       this.eqLow = ctx.createBiquadFilter(); this.eqLowMid = ctx.createBiquadFilter(); this.eqHighMid = ctx.createBiquadFilter(); this.eqHigh = ctx.createBiquadFilter();
-      this.compNode = ctx.createDynamicsCompressor();
-      this.analyserNode = ctx.createAnalyser(); this.analyserNode.fftSize = 256;
-      this.faderNode = ctx.createGain();
-      this.panNode = ctx.createStereoPanner();
+      this.compNode = ctx.createDynamicsCompressor(); this.analyserNode = ctx.createAnalyser(); this.analyserNode.fftSize = 256;
+      this.faderNode = ctx.createGain(); this.panNode = ctx.createStereoPanner();
   
       this.hpfNode.type = 'highpass'; this.hpfNode.frequency.value = 20;
       this.eqLow.type = 'lowshelf'; this.eqLow.frequency.value = 100;
@@ -26,49 +21,46 @@ export class ChannelNodeGroup {
       this.compNode.threshold.value = 0; this.compNode.ratio.value = 2; this.compNode.attack.value = 0.01; this.compNode.release.value = 0.1;
   
       this.sendNodes = [];
-      for (let i = 0; i < 16; i++) {
-        const sendGain = ctx.createGain();
-        sendGain.gain.value = 0;
-        this.sendNodes.push(sendGain);
-      }
+      for (let i = 0; i < 16; i++) { const sendGain = ctx.createGain(); sendGain.gain.value = 0; this.sendNodes.push(sendGain); }
   
       this.inputNode.connect(this.hpfNode); this.hpfNode.connect(this.gateNode); this.gateNode.connect(this.eqLow);
       this.eqLow.connect(this.eqLowMid); this.eqLowMid.connect(this.eqHighMid); this.eqHighMid.connect(this.eqHigh); this.eqHigh.connect(this.compNode);
       for (let i = 0; i < 16; i++) this.compNode.connect(this.sendNodes[i]);
       this.compNode.connect(this.analyserNode); this.analyserNode.connect(this.faderNode); this.faderNode.connect(this.panNode);
-      
       this.outputNode = this.panNode;
     }
   
-    // --- DCA & FADER MATH ---
-    updateDcaAssignments(dcaArray) {
-      this.assignedDcas = dcaArray;
-    }
+    // ==========================================
+    // DCA & MUTE GROUP MASTER MATH
+    // ==========================================
+    updateDcaAssignments(dcaArray) { this.assignedDcas = dcaArray; }
+    updateMuteAssignments(muteArray) { this.assignedMuteGroups = muteArray; }
   
-    setFader(db, globalDcaLevels) {
+    setFader(db, globalDcaLevels, globalMuteGroups) {
       this.baseFaderDb = db;
-      this.recalculateDcaGain(globalDcaLevels);
+      this.recalculateDcaGain(globalDcaLevels, globalMuteGroups);
     }
   
-    recalculateDcaGain(globalDcaLevels) {
+    recalculateDcaGain(globalDcaLevels, globalMuteGroups = Array(6).fill(false)) {
+      // 1. Calculate DCA Volume Offsets
       let dcaOffset = 0;
-      for (let dcaIdx of this.assignedDcas) {
-        dcaOffset += globalDcaLevels[dcaIdx]; // Combine offsets from all assigned DCAs
-      }
-      
+      for (let dcaIdx of this.assignedDcas) dcaOffset += globalDcaLevels[dcaIdx];
       let finalDb = this.baseFaderDb + dcaOffset;
-      
-      // Hard mute if fader or combined DCA offset drops it below -60
-      if (this.baseFaderDb <= -60 || finalDb <= -60) {
+  
+      // 2. Check if we are killed by a Mute Group
+      let isGroupMuted = this.assignedMuteGroups.some(idx => globalMuteGroups[idx]);
+  
+      // 3. Apply the final Math
+      if (isGroupMuted || this.baseFaderDb <= -60 || finalDb <= -60) {
         this.faderNode.gain.setTargetAtTime(0, this.ctx.currentTime, 0.01);
       } else {
-        // Ceiling limit to prevent digital clipping from DCA boosts
-        if (finalDb > 10) finalDb = 10; 
+        if (finalDb > 10) finalDb = 10; // Clipping ceiling
         const linear = Math.pow(10, finalDb / 20);
         this.faderNode.gain.setTargetAtTime(linear, this.ctx.currentTime, 0.01);
       }
     }
   
+    // ... [Keep existing transport, getMeterLevel, setEqBand, etc. exact same as before]
     setSendLevel(busIndex, db) { if (this.sendNodes[busIndex]) { const linear = db <= -60 ? 0 : Math.pow(10, db / 20); this.sendNodes[busIndex].gain.setTargetAtTime(linear, this.ctx.currentTime, 0.01); } }
     loadTrack(buffer) { if (this.isPlaying) this.stopTrack(); this.trackBuffer = buffer; this.playOffset = 0; }
     playTrack() { if (!this.trackBuffer || this.isPlaying) return; this.trackSource = this.ctx.createBufferSource(); this.trackSource.buffer = this.trackBuffer; this.trackSource.loop = true; this.trackSource.connect(this.inputNode); this.trackSource.start(0, this.playOffset); this.lastPlayTime = this.ctx.currentTime; this.isPlaying = true; }
