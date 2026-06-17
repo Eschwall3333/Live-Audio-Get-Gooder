@@ -80,9 +80,10 @@ body {
 
 /* The Metallic Fader Cap (Chrome/Webkit) */
 .long-throw-fader::-webkit-slider-thumb {
-  -webkit-appearance: none;
   width: 24px;  /* Vertical height of cap */
   height: 44px; /* Horizontal width of cap */
+  writing-mode: vertical-lr;
+  direction: rtl;
   
   /* 3D Metallic Gradient */
   background: linear-gradient(90deg, #1a1a1a 0%, #3a3a3c 20%, #5c5c60 50%, #3a3a3c 80%, #1a1a1a 100%);

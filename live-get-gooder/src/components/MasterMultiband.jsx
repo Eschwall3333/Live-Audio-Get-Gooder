@@ -1,86 +1,97 @@
 import React from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { updateMasterMultiband } from '../store/mixerSlice';
-import { audioEngine } from '../audio/AudioEngine';
 
 export const MasterMultiband = () => {
   const dispatch = useDispatch();
-  const mbc = useSelector((state) => state.mixer.master.multiband);
+  const multiband = useSelector(state => state.mixer.master.multiband);
 
-  const handleChange = (band, key, value) => {
-    const val = parseFloat(value);
-    dispatch(updateMasterMultiband({ band, key, value: val }));
-    const newState = { ...mbc, [band]: { ...mbc[band], [key]: val } };
-    audioEngine.setMasterMultiband(newState.active, newState.low, newState.mid, newState.high);
+  // 1. Power Switch Logic
+  const handleToggle = () => {
+    dispatch(updateMasterMultiband({ band: 'active', param: null, value: !multiband.active }));
   };
 
-  const toggleActive = () => {
-    const newActive = !mbc.active;
-    dispatch(updateMasterMultiband({ band: 'active', value: newActive }));
-    audioEngine.setMasterMultiband(newActive, mbc.low, mbc.mid, mbc.high);
+  // 2. Knob & Fader Logic
+  const handleParam = (band, param, val) => {
+    dispatch(updateMasterMultiband({ band, param, value: parseFloat(val) }));
   };
 
-  const BandControl = ({ bandName, label, data }) => (
-    <div style={{ flex: 1, padding: '10px', border: '1px solid #333', borderRadius: '4px', textAlign: 'center', background: '#222' }}>
-      <h4 style={{ margin: '0 0 15px 0', color: '#f39c12', fontSize: '12px' }}>{label}</h4>
-      
-      <div style={{ marginBottom: '15px' }}>
-        <label htmlFor={`mbc-${bandName}-thresh`} style={{ display: 'block', fontSize: '10px', color: '#888', marginBottom: '5px' }}>
-          THRESH ({data.thresh}dB)
-        </label>
+  // 3. UI Blueprint for each frequency band
+  const renderBand = (bandName, label, color) => {
+    const bandData = multiband[bandName];
+    
+    return (
+      <div style={{ flex: 1, padding: '10px', background: '#222', borderRadius: '4px', borderTop: `3px solid ${color}`, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+        <div style={{ color: '#fff', fontSize: '12px', fontWeight: 'bold', marginBottom: '15px' }}>{label}</div>
+
+        {/* THRESHOLD (Horizontal) */}
+        <label style={{ fontSize: '10px', color: '#888', marginBottom: '5px' }}>THRESH: {bandData.thresh}dB</label>
         <input 
-          id={`mbc-${bandName}-thresh`}
-          type="range" min="-60" max="0" step="1" value={data.thresh} 
-          onChange={(e) => handleChange(bandName, 'thresh', e.target.value)} 
-          style={{ width: '100%' }} 
+          type="range" min="-60" max="0" step="1" 
+          value={bandData.thresh} 
+          onChange={(e) => handleParam(bandName, 'thresh', e.target.value)} 
+          style={{ width: '100%', marginBottom: '15px' }} 
         />
-      </div>
-      
-      <div style={{ marginBottom: '15px' }}>
-        <label htmlFor={`mbc-${bandName}-ratio`} style={{ display: 'block', fontSize: '10px', color: '#888', marginBottom: '5px' }}>
-          RATIO ({data.ratio}:1)
-        </label>
+
+        {/* RATIO (Horizontal) */}
+        <label style={{ fontSize: '10px', color: '#888', marginBottom: '5px' }}>RATIO: {bandData.ratio}:1</label>
         <input 
-          id={`mbc-${bandName}-ratio`}
-          type="range" min="1" max="20" step="0.5" value={data.ratio} 
-          onChange={(e) => handleChange(bandName, 'ratio', e.target.value)} 
-          style={{ width: '100%' }} 
+          type="range" min="1" max="20" step="0.5" 
+          value={bandData.ratio} 
+          onChange={(e) => handleParam(bandName, 'ratio', e.target.value)} 
+          style={{ width: '100%', marginBottom: '20px' }} 
         />
+
+        {/* MAKEUP GAIN (Vertical Fader) */}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 'auto' }}>
+          
+          {/* FIX: Modern Vertical CSS applied here */}
+          <input
+            type="range" min="-15" max="15" step="0.5"
+            value={bandData.gain}
+            onChange={(e) => handleParam(bandName, 'gain', e.target.value)}
+            style={{
+              height: '120px', 
+              width: '24px',
+              writingMode: 'vertical-lr',
+              direction: 'rtl',
+              cursor: 'grab'
+            }}
+          />
+          
+          <label style={{ marginTop: '10px', fontSize: '11px', fontWeight: 'bold', color: '#f39c12' }}>
+            {bandData.gain > 0 ? `+${bandData.gain}` : bandData.gain} dB
+          </label>
+        </div>
       </div>
-      
-      <div>
-        <label htmlFor={`mbc-${bandName}-gain`} style={{ display: 'block', fontSize: '10px', color: '#888', marginBottom: '5px' }}>
-          GAIN ({data.gain}dB)
-        </label>
-        <input 
-          id={`mbc-${bandName}-gain`}
-          type="range" min="0" max="24" step="0.5" value={data.gain} 
-          onChange={(e) => handleChange(bandName, 'gain', e.target.value)} 
-          style={{ width: '100%' }} 
-        />
-      </div>
-    </div>
-  );
+    );
+  };
 
   return (
-    <div style={{ padding: '15px', background: '#1c1c1f', border: '1px solid #444', borderRadius: '6px', marginBottom: '10px' }}>
+    <div style={{ padding: '15px', background: '#1c1c1f', border: '1px solid #444', borderRadius: '6px', marginBottom: '15px' }}>
+      
+      {/* HEADER & POWER SWITCH */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '15px' }}>
-        <h3 style={{ margin: 0, color: '#f39c12', fontSize: '14px', letterSpacing: '1px' }}>MASTER MULTIBAND COMP</h3>
-        <button 
-          onClick={toggleActive}
+        <h3 style={{ margin: 0, color: '#17a2b8', fontSize: '14px', letterSpacing: '1px' }}>MASTER COMP</h3>
+        <button
+          onClick={handleToggle}
           style={{
-            background: mbc.active ? '#f39c12' : '#333', color: mbc.active ? '#000' : '#888',
-            border: 'none', padding: '6px 15px', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold', fontSize: '12px'
+            background: multiband.active ? '#2ecc71' : '#333',
+            color: multiband.active ? '#000' : '#888',
+            border: 'none', padding: '6px 12px', borderRadius: '3px', cursor: 'pointer', fontWeight: 'bold', fontSize: '10px'
           }}
         >
-          {mbc.active ? 'ACTIVE' : 'BYPASSED'}
+          {multiband.active ? 'ON' : 'OFF'}
         </button>
       </div>
-      <div style={{ display: 'flex', gap: '10px' }}>
-        <BandControl bandName="low" label="LOW (0 - 250Hz)" data={mbc.low} />
-        <BandControl bandName="mid" label="MID (250Hz - 2.5kHz)" data={mbc.mid} />
-        <BandControl bandName="high" label="HIGH (2.5kHz+)" data={mbc.high} />
+
+      {/* THE 3 BANDS */}
+      <div style={{ display: 'flex', gap: '8px' }}>
+        {renderBand('low', 'LOW', '#2ecc71')}
+        {renderBand('mid', 'MID', '#f1c40f')}
+        {renderBand('high', 'HIGH', '#17a2b8')}
       </div>
+
     </div>
   );
 };
