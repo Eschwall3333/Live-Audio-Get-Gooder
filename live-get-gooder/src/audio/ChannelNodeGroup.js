@@ -22,7 +22,7 @@ export class ChannelNodeGroup {
 
     // METERING SENSOR
     this.analyser = this.ctx.createAnalyser();
-    this.analyser.fftSize = 256;
+    this.analyser.fftSize = 1024; // <-- UPGRADED RESOLUTION FOR RTA
     this.analyser.smoothingTimeConstant = 0.8;
 
     this.muteGain = this.ctx.createGain();
@@ -176,5 +176,11 @@ export class ChannelNodeGroup {
     let db = 20 * Math.log10(rms);
     if (db < -80 || !isFinite(db)) db = -80;
     return db;
+  }
+
+  // Pulls the raw frequency spectrum for the RTA
+  getFrequencyData(array) {
+    if (!this.ctx || !this.analyser) return;
+    this.analyser.getByteFrequencyData(array);
   }
 }

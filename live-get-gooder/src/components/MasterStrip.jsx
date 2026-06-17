@@ -25,8 +25,8 @@ export const MasterStrip = () => {
 
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 'auto', marginBottom: '10px' }}>
         
-        {/* FIX: Modern, standardized vertical CSS */}
         <input 
+          id="master-fader" // <--- ADDED ID
           type="range" min="-60" max="10" step="0.5" 
           value={faderLevel} 
           onChange={handleFader} 
@@ -39,7 +39,7 @@ export const MasterStrip = () => {
           }} 
         />
         
-        <label style={{ marginTop: '15px', fontWeight: 'bold', color: '#f39c12', cursor: 'pointer', fontSize: '12px' }}>
+        <label htmlFor="master-fader" style={{ marginTop: '15px', fontWeight: 'bold', color: '#f39c12', cursor: 'pointer', fontSize: '12px' }}>
           {faderLevel <= -60 ? '-oo' : `${faderLevel} dB`}
         </label>
         

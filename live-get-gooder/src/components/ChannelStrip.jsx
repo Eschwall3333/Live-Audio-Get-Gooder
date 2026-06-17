@@ -2,70 +2,43 @@ import React, { useRef, useEffect } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { updateParam, selectChannel } from '../store/mixerSlice';
 import { audioEngine } from '../audio/AudioEngine';
-import { ChannelSends } from './ChannelSends';
 import { MiniEQDisplay } from './MiniEQDisplay';
 
-// ==========================================================
-// 1. THE EMBEDDED LED METER ENGINE
-// ==========================================================
 const IntegratedMeter = ({ channelId }) => {
-  const canvasRef = useRef(null);
-  const requestRef = useRef();
+  const canvasRef = useRef(null); const requestRef = useRef();
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    const width = canvas.width;
-    const height = canvas.height;
+    const canvas = canvasRef.current; if (!canvas) return;
+    const ctx = canvas.getContext('2d'); const width = canvas.width; const height = canvas.height;
 
     const drawMeter = () => {
       let db = -80; 
-
-      if (audioEngine.ctx) {
-        try {
-          const engineChannel = audioEngine.getChannel(channelId);
-          if (engineChannel) db = engineChannel.getLevel();
-        } catch (err) { /* Fail silently if engine booting */ }
-      }
-
+      if (audioEngine.ctx) { try { const engineChannel = audioEngine.getChannel(channelId); if (engineChannel) db = engineChannel.getLevel(); } catch (err) { } }
       let percent = (db + 60) / 70; 
-      if (percent < 0.01) percent = 0.01; // Tiny green dot so you know it's powered on
-      if (percent > 1) percent = 1;
-
+      if (percent < 0.01) percent = 0.01; if (percent > 1) percent = 1;
       const meterHeight = percent * height;
 
-      // Draw dark background
-      ctx.fillStyle = '#0a0a0c';
-      ctx.fillRect(0, 0, width, height);
-
-      // Draw glowing gradient
+      ctx.fillStyle = '#050505'; ctx.fillRect(0, 0, width, height);
       const gradient = ctx.createLinearGradient(0, height, 0, 0);
-      gradient.addColorStop(0, '#2ecc71');   
-      gradient.addColorStop(0.7, '#f1c40f'); 
-      gradient.addColorStop(0.9, '#e74c3c'); 
+      gradient.addColorStop(0, '#2ecc71'); gradient.addColorStop(0.7, '#f1c40f'); gradient.addColorStop(0.9, '#e74c3c'); 
+      ctx.fillStyle = gradient; ctx.fillRect(0, height - meterHeight, width, meterHeight);
 
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, height - meterHeight, width, meterHeight);
-
+      ctx.fillStyle = '#000';
+      for(let i = 0; i < height; i += 4) ctx.fillRect(0, i, width, 1);
       requestRef.current = requestAnimationFrame(drawMeter);
     };
-
     requestRef.current = requestAnimationFrame(drawMeter);
     return () => cancelAnimationFrame(requestRef.current);
   }, [channelId]);
 
   return (
-    <div style={{ background: '#000', padding: '2px', borderRadius: '3px', border: '1px solid #222' }}>
-      <canvas ref={canvasRef} width="10" height="250" style={{ display: 'block', borderRadius: '2px' }} />
+    <div style={{ background: '#000', padding: '1px', border: '1px solid #111' }}>
+      <canvas ref={canvasRef} width="8" height="200" style={{ display: 'block' }} />
     </div>
   );
 };
 
-// ==========================================================
-// 2. THE MAIN CHANNEL STRIP
-// ==========================================================
-export const ChannelStrip = ({ channel }) => {
+export const ChannelStrip = ({ channel, activeTab }) => {
   const dispatch = useDispatch();
   const selectedChannelId = useSelector(state => state.mixer.selectedChannelId);
   const isSelected = selectedChannelId === channel.id;
@@ -73,86 +46,69 @@ export const ChannelStrip = ({ channel }) => {
   const handleFader = (e) => {
     const val = parseFloat(e.target.value);
     dispatch(updateParam({ channelId: channel.id, key: 'faderLevel', value: val }));
-    audioEngine.setChannelFader(channel.id, val);
+    if (audioEngine.ctx) { try { audioEngine.setChannelFader(channel.id, val); } catch(e) {} }
   };
 
   const handlePan = (e) => {
     const val = parseFloat(e.target.value);
     dispatch(updateParam({ channelId: channel.id, key: 'pan', value: val }));
-    const engineChannel = audioEngine.getChannel(channel.id);
-    if (engineChannel && typeof engineChannel.setPan === 'function') {
-      engineChannel.setPan(val);
-    }
+    if (audioEngine.ctx) { try { const engineChannel = audioEngine.getChannel(channel.id); if (engineChannel && typeof engineChannel.setPan === 'function') engineChannel.setPan(val); } catch(e) {} }
   };
 
+  const handleTrim = (e) => {
+    const val = parseFloat(e.target.value) || 0;
+    dispatch(updateParam({ channelId: channel.id, key: 'trim', value: val }));
+  };
+
+  const showFullGrid = activeTab === 'Mixer';
+
   return (
-    <div className="channel-strip" style={{ 
-      minWidth: '110px', flexShrink: 0, padding: '10px', 
-      background: isSelected ? '#2a2a2c' : '#222', 
-      border: isSelected ? '1px solid #17a2b8' : '1px solid #333', 
-      borderRadius: '4px', display: 'flex', flexDirection: 'column' 
-    }}>
+    <div style={{ width: '85px', minWidth: '85px', flexShrink: 0, background: isSelected ? '#2a2a2c' : '#141414', border: isSelected ? '1px solid #0984e3' : '1px solid #000', borderRight: '1px solid #222', display: 'flex', flexDirection: 'column', fontFamily: 'sans-serif', height: showFullGrid ? '100%' : 'auto' }}>
       
-      <div className="scribble-strip" style={{ background: '#444', color: '#fff', textAlign: 'center', padding: '5px', borderRadius: '3px', marginBottom: '10px', fontSize: '12px', fontWeight: 'bold' }}>
+      {showFullGrid && (
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+          {/* FIX: Interactive Trim Input */}
+          <div style={{ height: '30px', borderBottom: '1px solid #222', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <input type="number" value={channel.trim || 0} onChange={handleTrim} onDoubleClick={() => handleTrim({target: {value: 0}})} style={{ width: '100%', background: 'transparent', border: 'none', color: '#ccc', fontSize: '11px', fontWeight: 'bold', textAlign: 'center', outline: 'none', MozAppearance: 'textfield', WebkitAppearance: 'none' }} />
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', padding: '4px', borderBottom: '1px solid #222' }}>
+            <div style={{ height: '35px', background: '#0a0a0c', border: '1px solid #333', position: 'relative' }}><div style={{ position: 'absolute', bottom: '2px', left: '2px', fontSize: '8px', color: '#555' }}>GATE</div></div>
+            <div style={{ height: '35px', background: '#0a0a0c', border: '1px solid #333', position: 'relative' }}><div style={{ position: 'absolute', bottom: '2px', left: '2px', fontSize: '8px', color: '#555' }}>DYN</div></div>
+            <div style={{ height: '40px', background: '#0a0a0c', border: '1px solid #333', overflow: 'hidden' }}><MiniEQDisplay eq={channel.eq} /></div>
+          </div>
+          <div style={{ flex: 1, padding: '4px', borderBottom: '1px solid #222', display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <div style={{ width: '80%', height: '3px', background: '#0984e3' }}></div>
+            <div style={{ width: '40%', height: '3px', background: '#0984e3' }}></div>
+            <div style={{ width: '10%', height: '3px', background: '#555' }}></div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ height: '35px', background: '#0984e3', color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '12px', fontWeight: 'bold', borderBottom: '1px solid #000' }}>
         {channel.name}
       </div>
 
-      <MiniEQDisplay eq={channel.eq} />
-
-      <button 
-        onClick={() => dispatch(selectChannel(channel.id))}
-        style={{
-          background: isSelected ? '#17a2b8' : '#333',
-          color: isSelected ? '#000' : '#888',
-          border: 'none', padding: '5px', borderRadius: '3px', cursor: 'pointer', fontWeight: 'bold', marginBottom: '15px'
-        }}
-      >
-        SELECT
-      </button>
-      
-      <ChannelSends channel={channel} />
-
-      <div style={{ textAlign: 'center', marginBottom: '15px' }}>
-        <label htmlFor={`channel-${channel.id}-pan`} style={{ fontSize: '10px', color: '#888', display: 'block', marginBottom: '5px' }}>
-          PAN {channel.pan > 0 ? `R${channel.pan}` : channel.pan < 0 ? `L${Math.abs(channel.pan)}` : 'C'}
-        </label>
-        <input 
-          id={`channel-${channel.id}-pan`}
-          type="range" min="-100" max="100" step="1" 
-          value={channel.pan} 
-          onChange={handlePan} 
-          style={{ width: '80%' }} 
-        />
+      <div style={{ padding: '6px 4px', display: 'flex', flexDirection: 'column', gap: '6px', borderBottom: '1px solid #222' }}>
+        <button onClick={() => dispatch(selectChannel(channel.id))} style={{ background: isSelected ? '#0984e3' : '#222', color: isSelected ? '#fff' : '#888', border: '1px solid #111', padding: '4px', borderRadius: '2px', cursor: 'pointer', fontWeight: 'bold', fontSize: '10px' }}>SELECT</button>
+        <button style={{ background: '#222', color: '#888', border: '1px solid #111', padding: '4px', borderRadius: '2px', cursor: 'pointer', fontWeight: 'bold', fontSize: '10px' }}>SOLO</button>
+        {/* FIX: Double Click Pan Reset */}
+        <div style={{ display: 'flex', justifyContent: 'center' }}><input id={`channel-${channel.id}-pan`} type="range" min="-100" max="100" step="1" value={channel.pan} onChange={handlePan} onDoubleClick={() => handlePan({target: {value: 0}})} style={{ width: '100%', accentColor: '#0984e3' }} /></div>
       </div>
 
-      {/* 6. METER & MAIN FADER */}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: 'auto', marginBottom: '10px' }}>
-        
-        <div style={{ display: 'flex', flexDirection: 'row', gap: '15px', alignItems: 'flex-end', height: '250px' }}>
-          
-          <IntegratedMeter channelId={channel.id} />
-
-          {/* FIX #2: Inline modern CSS to guarantee sliding faders */}
-          <input 
-            id={`channel-${channel.id}-fader`}
-            type="range" min="-60" max="10" step="0.5" 
-            value={channel.faderLevel} 
-            onChange={handleFader} 
-            style={{ 
-              height: '250px', 
-              width: '30px',
-              writingMode: 'vertical-lr', 
-              direction: 'rtl',
-              cursor: 'grab'
-            }} 
-          />
+      <div style={{ padding: '8px 4px', display: 'flex', flexDirection: 'column', alignItems: 'center', background: '#1c1c1c' }}>
+        <div style={{ color: '#fff', fontSize: '10px', fontWeight: 'bold', marginBottom: '8px' }}>
+          {channel.faderLevel <= -60 ? '-oo' : `${channel.faderLevel > 0 ? '+' : ''}${channel.faderLevel.toFixed(1)}`}
         </div>
-
-        <label htmlFor={`channel-${channel.id}-fader`} style={{ marginTop: '15px', fontWeight: 'bold', color: '#f39c12', cursor: 'pointer', fontSize: '12px' }}>
-          {channel.faderLevel <= -60 ? '-oo' : `${channel.faderLevel} dB`}
-        </label>
+        <div style={{ display: 'flex', flexDirection: 'row', gap: '8px', height: '200px' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', height: '100%', fontSize: '8px', color: '#666', textAlign: 'right' }}>
+            <span>10</span><span>5</span><span>0</span><span>5</span><span>10</span><span>20</span><span>30</span><span>40</span><span>60</span>
+          </div>
+          {/* FIX: Double Click Fader Reset (-80) */}
+          <input id={`channel-${channel.id}-fader`} type="range" min="-60" max="10" step="0.5" value={channel.faderLevel} onChange={handleFader} onDoubleClick={() => handleFader({target: {value: -80}})} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', cursor: 'grab', accentColor: '#555' }} />
+          <IntegratedMeter channelId={channel.id} />
+        </div>
+        <button style={{ marginTop: '12px', width: '100%', background: '#222', color: '#c0392b', border: '1px solid #111', padding: '6px', borderRadius: '2px', cursor: 'pointer', fontWeight: 'bold', fontSize: '11px' }}>MUTE</button>
       </div>
-      
     </div>
   );
 };

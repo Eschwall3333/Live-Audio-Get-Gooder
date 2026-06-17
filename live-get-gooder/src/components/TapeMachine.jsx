@@ -4,21 +4,16 @@ import { audioEngine } from '../audio/AudioEngine';
 export const TapeMachine = () => {
   const [trackName, setTrackName] = useState('NO MEDIA LOADED');
   const [isPlaying, setIsPlaying] = useState(false);
-  
-  // --- FIX: Now defaults to routing audio to Channel 1 on boot ---
   const [targetChannel, setTargetChannel] = useState(1); 
-  
   const fileInputRef = useRef(null);
 
   const handleFileUpload = async (e) => {
     const file = e.target.files[0];
     if (!file) return;
 
-    // 1. SAFETY CHECK: Boot the engine if it's completely offline
     if (!audioEngine.ctx) {
       await audioEngine.init();
     } else if (audioEngine.ctx.state === 'suspended') {
-      // Or wake it up if the browser paused it
       await audioEngine.ctx.resume();
     }
 
@@ -41,13 +36,11 @@ export const TapeMachine = () => {
   };
 
   const handlePlay = async () => {
-    // 2. SAFETY CHECK: Boot the engine here too, just in case!
     if (!audioEngine.ctx) {
       await audioEngine.init();
     } else if (audioEngine.ctx.state === 'suspended') {
       await audioEngine.ctx.resume();
     }
-    
     audioEngine.playChannelTrack(targetChannel);
     setIsPlaying(true);
   };
@@ -67,13 +60,15 @@ export const TapeMachine = () => {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
         <h3 style={{ margin: 0, color: '#17a2b8', fontSize: '14px', letterSpacing: '1px' }}>USB 2-TRACK</h3>
         
-        {/* ROUTING SELECTOR */}
-        <div style={{ fontSize: '10px', color: '#888' }}>
-          ROUTE TO: 
+        <div style={{ fontSize: '10px', color: '#888', display: 'flex', alignItems: 'center' }}>
+          {/* FIX: Explicit Label and ID for the Routing Dropdown */}
+          <label htmlFor="tape-route-select" style={{ marginRight: '5px' }}>ROUTE TO: </label>
           <select 
+            id="tape-route-select"
+            name="tape-route-select"
             value={targetChannel} 
             onChange={(e) => setTargetChannel(parseInt(e.target.value))}
-            style={{ marginLeft: '5px', background: '#000', color: '#fff', border: '1px solid #333', padding: '2px' }}
+            style={{ background: '#000', color: '#fff', border: '1px solid #333', padding: '2px' }}
           >
             {[...Array(32)].map((_, i) => (
               <option key={i+1} value={i+1}>CH {i+1}</option>
@@ -82,7 +77,6 @@ export const TapeMachine = () => {
         </div>
       </div>
 
-      {/* SCRIBBLE SCREEN */}
       <div style={{ 
         background: '#0a0a0c', border: '1px inset #222', padding: '10px', 
         marginBottom: '10px', color: '#2ecc71', fontFamily: 'monospace', 
@@ -91,8 +85,11 @@ export const TapeMachine = () => {
         {isPlaying ? '▶ ' : '■ '} {trackName}
       </div>
 
-      {/* HIDDEN FILE INPUT */}
+      {/* FIX: Explicit ID and hidden label for the file input */}
+      <label htmlFor="tape-file-upload" style={{ display: 'none' }}>Upload Audio File</label>
       <input 
+        id="tape-file-upload"
+        name="tape-file-upload"
         type="file" 
         accept="audio/*" 
         ref={fileInputRef} 
@@ -100,7 +97,6 @@ export const TapeMachine = () => {
         style={{ display: 'none' }} 
       />
 
-      {/* TRANSPORT CONTROLS */}
       <div style={{ display: 'flex', gap: '5px' }}>
         <button onClick={() => fileInputRef.current.click()} style={btnStyle('#333', '#fff')}>EJECT / LOAD</button>
         <button onClick={handleStop} style={btnStyle('#333', '#dc3545')}>STOP</button>
@@ -112,7 +108,6 @@ export const TapeMachine = () => {
   );
 };
 
-// Quick helper for button styling
 const btnStyle = (bg, color) => ({
   flex: 1, background: bg, color: color, border: 'none', 
   padding: '8px', borderRadius: '3px', cursor: 'pointer', fontWeight: 'bold', fontSize: '10px'
