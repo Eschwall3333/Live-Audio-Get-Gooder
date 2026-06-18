@@ -4,6 +4,7 @@ class AudioEngine {
   constructor() {
     this.ctx = null;
     this.channels = new Map();
+    this.physicalInputs = {}; // <--- NEW: 32 Physical Hardware Jacks
     this.masterGain = null;
     this.feedbackActive = false;
     this.toneActive = false;
@@ -11,6 +12,10 @@ class AudioEngine {
     this.toneSource = null; 
     this.globalDcaLevels = Array(8).fill(0); // 8 DCAs starting at 0dB
     this.globalMuteGroups = Array(6).fill(false); // 6 Mute Groups, starting un-muted
+    
+    // Tape Machine variables
+    this.tapeBuffer = null;
+    this.tapeSource = null;
   }
 
   async init() {
@@ -23,6 +28,14 @@ class AudioEngine {
       await this.ctx.audioWorklet.addModule('/noise-gate-processor.js');
     } catch (e) {
       console.warn("AudioWorklet not found. Gate will be bypassed until file exists.");
+    }
+
+    // ==========================================
+    // 0. PHYSICAL INPUTS (THE PATCHBAY JACKS)
+    // ==========================================
+    for (let i = 1; i <= 32; i++) {
+      this.physicalInputs[i] = this.ctx.createGain();
+      this.physicalInputs[i].gain.value = 1.0; 
     }
     
     // ==========================================
@@ -151,6 +164,12 @@ class AudioEngine {
       for (let b = 0; b < 16; b++) {
         channelNodes.sendNodes[b].connect(this.busMasters[b]);
       }
+      
+      // Default 1:1 Routing Patch (Input 1 -> Channel 1, Input 2 -> Channel 2, etc.)
+      if (this.physicalInputs[i] && channelNodes.inputNode) {
+        this.physicalInputs[i].connect(channelNodes.inputNode);
+      }
+
       this.channels.set(i, channelNodes);
     }
   }
@@ -180,6 +199,28 @@ class AudioEngine {
     const ch = this.channels.get(id);
     if (!ch) throw new Error(`Audio Channel ${id} not initialized.`);
     return ch;
+  }
+
+  // --- NEW: THE DIGITAL PATCH CABLE ---
+  routeInputToChannel(inputId, channelId) {
+    const inputNode = this.physicalInputs[inputId];
+    const channel = this.getChannel(channelId);
+
+    if (!inputNode || !channel || !channel.inputNode) return;
+
+    // 1. Unplug this channel from ALL physical inputs to silence it
+    for (let i = 1; i <= 32; i++) {
+      try {
+        this.physicalInputs[i].disconnect(channel.inputNode);
+      } catch(e) {
+        // Ignored: Web Audio throws an error if you disconnect a node that wasn't connected
+      }
+    }
+
+    // 2. Plug the newly selected physical input into the channel
+    inputNode.connect(channel.inputNode);
+    
+    console.log(`[PATCHBAY] Physical Input IN${inputId} routed to Channel ${channelId}`);
   }
 
   updateBusMatrixRouting(busIndex, matrixAssignmentsArray) {
@@ -344,15 +385,40 @@ class AudioEngine {
   }
 
   // ==========================================
-  // TAPE MACHINE
+  // TAPE MACHINE (Rewired for Patchbay)
   // ==========================================
-  loadTrackIntoChannel(id, audioBuffer) {
+  loadTrackIntoChannel(inputId, audioBuffer) {
     if (!this.ctx) return;
-    this.getChannel(id).loadTrack(audioBuffer);
+    this.tapeBuffer = audioBuffer;
+    this.tapeInputId = inputId; // Store which physical jack it's plugged into
   }
-  playChannelTrack(id) { this.getChannel(id).playTrack(); }
-  pauseChannelTrack(id) { this.getChannel(id).pauseTrack(); }
-  stopChannelTrack(id) { this.getChannel(id).stopTrack(); }
+
+  playChannelTrack(inputId) { 
+    if (!this.ctx || !this.tapeBuffer) return;
+    this.stopChannelTrack(); // Clear old track if exists
+    
+    this.tapeSource = this.ctx.createBufferSource();
+    this.tapeSource.buffer = this.tapeBuffer;
+    
+    // Plug the Tape Machine directly into the Physical Hardware Jack
+    const targetJack = inputId || this.tapeInputId || 1;
+    if (this.physicalInputs[targetJack]) {
+      this.tapeSource.connect(this.physicalInputs[targetJack]);
+    }
+    
+    this.tapeSource.start();
+  }
+  
+  pauseChannelTrack() { 
+    this.stopChannelTrack(); 
+  }
+  
+  stopChannelTrack() { 
+    if (this.tapeSource) {
+      try { this.tapeSource.stop(); this.tapeSource.disconnect(); } catch (e) {}
+      this.tapeSource = null;
+    }
+  }
 
   // ==========================================
   // FEEDBACK SIMULATOR
@@ -432,6 +498,11 @@ class AudioEngine {
 
     mixerState.channels.forEach(ch => {
       const engineChannel = this.getChannel(ch.id);
+
+      // Restore Soft Patch Routing
+      if (ch.source) {
+        this.routeInputToChannel(parseInt(ch.source, 10) || ch.id, ch.id);
+      }
 
       this.updateChannelDcaRouting(ch.id, ch.dcaAssignments);
       this.updateChannelMuteRouting(ch.id, ch.muteGroupAssignments);

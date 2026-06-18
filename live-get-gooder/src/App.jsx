@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useSelector } from 'react-redux';
 import { ChannelStrip } from './components/ChannelStrip';
 import { FatChannel } from './components/FatChannel';
@@ -7,24 +7,29 @@ import { SceneManager } from './components/SceneManager';
 import { FxReturnStrip } from './components/FxReturnStrip';
 import { MasterStrip } from './components/MasterStrip';
 import { TapeMachine } from './components/TapeMachine';
+import { audioEngine } from './audio/AudioEngine';
 
 export const App = () => {
   const channels = useSelector(state => state.mixer.channels);
   
-  // GLOBAL VIEW STATE
   const [activeLayer, setActiveLayer] = useState(1);
-  const [activeTab, setActiveTab] = useState('EQ'); 
+  const [activeTab, setActiveTab] = useState('Channel'); 
 
   const visibleChannels = activeLayer === 1 ? channels.slice(0, 16) : channels.slice(16, 32);
   const navTabs = ['Mixer', 'Channel', 'Config', 'Gate', 'Dyn', 'EQ', 'Sends', 'Main'];
 
+  useEffect(() => {
+    const initAudio = async () => { await audioEngine.init(); };
+    window.addEventListener('click', initAudio, { once: true });
+  }, []);
+
   return (
     <div style={{ display: 'flex', height: '100vh', width: '100vw', backgroundColor: '#111', color: '#eee', overflow: 'hidden', fontFamily: 'sans-serif' }}>
-
-      {/* LEFT COLUMN: THE MAIN WORKSPACE */}
+      
+      {/* LEFT COLUMN: MAIN WORKSPACE */}
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-
-        {/* TOP MENU BAR (M32 Style) */}
+        
+        {/* TOP MENU BAR */}
         <div style={{ display: 'flex', background: '#222', borderBottom: '1px solid #000', padding: '5px 10px', gap: '5px' }}>
           {navTabs.map(tab => (
             <button
@@ -42,17 +47,15 @@ export const App = () => {
           ))}
         </div>
 
-        {/* FAT CHANNEL VIEWPORT (Visible on every tab EXCEPT 'Mixer') */}
+        {/* FAT CHANNEL VIEWPORT */}
         {activeTab !== 'Mixer' && (
           <div style={{ height: '45vh', minHeight: '300px', borderBottom: '2px solid #000', display: 'flex', flexShrink: 0 }}>
             <FatChannel activeTab={activeTab} />
           </div>
         )}
 
-        {/* CHANNEL BANK (Auto-resizes based on the Fat Channel above it) */}
+        {/* CHANNEL BANK */}
         <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-          
-          {/* Fader Layer Buttons */}
           <div style={{ width: '40px', background: '#1a1a1c', borderRight: '1px solid #000', display: 'flex', flexDirection: 'column', padding: '10px 2px', gap: '5px', flexShrink: 0 }}>
             <button onClick={() => setActiveLayer(1)} style={{ flex: 1, maxHeight: '100px', background: activeLayer === 1 ? '#0984e3' : '#333', color: activeLayer === 1 ? '#fff' : '#888', border: 'none', cursor: 'pointer', fontWeight: 'bold', writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>1-16</button>
             <button onClick={() => setActiveLayer(2)} style={{ flex: 1, maxHeight: '100px', background: activeLayer === 2 ? '#0984e3' : '#333', color: activeLayer === 2 ? '#fff' : '#888', border: 'none', cursor: 'pointer', fontWeight: 'bold', writingMode: 'vertical-rl', transform: 'rotate(180deg)' }}>17-32</button>
@@ -63,11 +66,10 @@ export const App = () => {
               <ChannelStrip key={channel.id} channel={channel} activeTab={activeTab} />
             ))}
           </div>
-
         </div>
       </div>
 
-      {/* RIGHT COLUMN: UTILITY & MASTER LR */}
+      {/* RIGHT COLUMN: MASTER RACK */}
       <div style={{ width: '380px', flexShrink: 0, background: '#1a1a1c', borderLeft: '2px solid #000', display: 'flex', flexDirection: 'column', overflowY: 'auto' }}>
         <SceneManager />
         <TapeMachine />
@@ -77,7 +79,6 @@ export const App = () => {
           <MasterStrip />
         </div>
       </div>
-
     </div>
   );
 };

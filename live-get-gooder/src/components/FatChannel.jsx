@@ -4,26 +4,122 @@ import { updateChannelEq, updateParam, updateChannelSend } from '../store/mixerS
 import { audioEngine } from '../audio/AudioEngine';
 
 // ==========================================
-// 1. EQ & RTA ENGINE
+// 1. DYNAMIC SVG RENDERERS (Hardware Curves)
 // ==========================================
-const BigEQDisplay = ({ channelId, eq, rtaEnabled }) => {
+const GateCurve = ({ thresh = -40, range = 40, active = false }) => {
+  const tx = Math.max(0, Math.min(((thresh + 80) / 80) * 100, 100));
+  const ty = 100 - tx;
+  const rY = (range / 80) * 100;
+  return (
+    <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%', overflow: 'visible' }}>
+      <path d={`M 0 ${Math.min(100, ty + rY)} L ${tx} ${ty + rY} L ${tx} ${ty} L 100 0`} stroke={active ? '#0984e3' : '#666'} strokeWidth="2" fill="none" strokeLinejoin="round" />
+    </svg>
+  );
+};
+
+const CompCurve = ({ thresh = -10, ratio = 2.5, active = false }) => {
+  const tx = Math.max(0, Math.min(((thresh + 60) / 60) * 100, 100));
+  const ty = 100 - tx;
+  const endY = ty - ((100 - tx) / Math.max(1, ratio));
+  return (
+    <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%', overflow: 'visible' }}>
+      <path d={`M 0 100 L ${tx} ${ty} L 100 ${endY}`} stroke={active ? '#0984e3' : '#666'} strokeWidth="2" fill="none" strokeLinejoin="round" />
+    </svg>
+  );
+};
+
+const EnvelopeGraph = ({ a = 10, h = 500, r = 900, isComp = false }) => {
+  const aw = Math.max(2, (a / 120) * 25);
+  const hw = Math.max(5, (h / 2000) * 35);
+  const rw = Math.max(5, (r / 4000) * 30);
+  const startY = isComp ? 20 : 90; const peakY = isComp ? 90 : 20;
+  return (
+    <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}>
+      <path d={`M 5 ${startY} L ${5+aw} ${peakY} L ${5+aw+hw} ${peakY} L ${5+aw+hw+rw} ${startY}`} stroke="#0984e3" strokeWidth="2" fill="rgba(9, 132, 227, 0.4)" strokeLinejoin="round" />
+      <line x1={5+aw} y1="0" x2={5+aw} y2="100" stroke="#0984e3" strokeWidth="1" opacity="0.5" />
+      <line x1={5+aw+hw} y1="0" x2={5+aw+hw} y2="100" stroke="#0984e3" strokeWidth="1" opacity="0.5" />
+    </svg>
+  );
+};
+
+const MiniEQCurve = ({ eq }) => {
+  const bands = eq || { low: {}, lowMid: {}, highMid: {}, high: {} };
+  const bandKeys = ['low', 'lowMid', 'highMid', 'high'];
+  let path = "M 0 50 ";
+  for (let x = 0; x <= 100; x += 2) {
+    const f = Math.pow(10, Math.log10(20) + (x / 100) * (Math.log10(20000) - Math.log10(20)));
+    let totalGain = 0;
+    bandKeys.forEach(key => {
+      const b = bands[key];
+      if (b && b.freq) totalGain += (b.gain || 0) * Math.exp(-0.5 * Math.pow((b.q || 1) * Math.log2(f / b.freq), 2));
+    });
+    const y = 50 - (totalGain / 15) * 40;
+    path += `L ${x} ${y} `;
+  }
+  return (
+    <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}>
+      <path d={path} stroke="#0984e3" strokeWidth="2" fill="none" />
+      <path d={`${path} L 100 50 L 0 50`} stroke="none" fill="rgba(9, 132, 227, 0.2)" />
+      <line x1="0" y1="50" x2="100" y2="50" stroke="#333" strokeWidth="1" />
+    </svg>
+  );
+};
+
+// ==========================================
+// 2. INTERACTIVE EQ ENGINE
+// ==========================================
+const BigEQDisplay = ({ channelId, eq, rtaEnabled, onBandChange }) => {
   const wrapperRef = useRef(null); const canvasRef = useRef(null);
   const requestRef = useRef(); const rtaData = useMemo(() => new Uint8Array(512), []);
   const bandColors = ['#1abc9c', '#3498db', '#e84393', '#e67e22'];
+  const bandKeys = ['low', 'lowMid', 'highMid', 'high'];
+  const [draggingBand, setDraggingBand] = useState(null);
+
+  const getLogScaling = (width, height) => {
+    const logMin = Math.log10(20); const logMax = Math.log10(20000);
+    const getX = (freq) => ((Math.log10(freq) - logMin) / (logMax - logMin)) * width;
+    const getFreq = (x) => Math.pow(10, logMin + (x / width) * (logMax - logMin));
+    const getY = (gain) => (height / 2) - (gain / 15) * (height / 2 - 10);
+    const getGain = (y) => ((height / 2 - y) / (height / 2 - 10)) * 15;
+    return { getX, getY, getFreq, getGain };
+  };
+
+  const handleMouseDown = (e) => {
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left; const y = e.clientY - rect.top;
+    const { getX, getY } = getLogScaling(canvasRef.current.width, canvasRef.current.height);
+    let closestBand = null; let minDistance = 20;
+    bandKeys.forEach((key) => {
+      const b = eq[key];
+      if (b && b.freq) {
+        const dist = Math.hypot(getX(b.freq) - x, getY(b.gain || 0) - y);
+        if (dist < minDistance) { closestBand = key; minDistance = dist; }
+      }
+    });
+    if (closestBand) setDraggingBand(closestBand);
+  };
+
+  const handleMouseMove = (e) => {
+    if (!draggingBand) return;
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = Math.max(0, Math.min(e.clientX - rect.left, canvasRef.current.width));
+    const y = Math.max(0, Math.min(e.clientY - rect.top, canvasRef.current.height));
+    const { getFreq, getGain } = getLogScaling(canvasRef.current.width, canvasRef.current.height);
+    onBandChange(draggingBand, 'freq', Math.max(20, Math.min(20000, Math.round(getFreq(x)))));
+    onBandChange(draggingBand, 'gain', Math.max(-15, Math.min(15, Math.round(getGain(y) * 10) / 10)));
+  };
+
+  const handleMouseUp = () => setDraggingBand(null);
 
   useEffect(() => {
     const wrapper = wrapperRef.current; const canvas = canvasRef.current;
     if (!wrapper || !canvas) return; const ctx = canvas.getContext('2d');
-    const minFreq = 20; const maxFreq = 20000;
-    const logMin = Math.log10(minFreq); const logMax = Math.log10(maxFreq);
 
     const drawLoop = () => {
       const width = wrapper.clientWidth; const height = wrapper.clientHeight;
       if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
       
-      const getX = (freq) => ((Math.log10(freq) - logMin) / (logMax - logMin)) * width;
-      const getFreq = (x) => Math.pow(10, logMin + (x / width) * (logMax - logMin));
-      const getY = (gain) => (height / 2) - (gain / 15) * (height / 2 - 10);
+      const { getX, getY, getFreq } = getLogScaling(width, height);
 
       ctx.fillStyle = '#050505'; ctx.fillRect(0, 0, width, height);
       ctx.strokeStyle = '#222'; ctx.lineWidth = 1;
@@ -39,7 +135,7 @@ const BigEQDisplay = ({ channelId, eq, rtaEnabled }) => {
             ctx.fillStyle = 'rgba(26, 188, 156, 0.2)'; ctx.beginPath(); ctx.moveTo(0, height);
             for (let i = 0; i < rtaData.length; i++) {
               const freq = i * (nyquist / rtaData.length);
-              if (freq < minFreq) continue; if (freq > maxFreq) break;
+              if (freq < 20) continue; if (freq > 20000) break;
               ctx.lineTo(getX(freq), height - (rtaData[i] / 255) * height);
             }
             ctx.lineTo(width, height); ctx.fill();
@@ -48,37 +144,34 @@ const BigEQDisplay = ({ channelId, eq, rtaEnabled }) => {
       }
 
       const bands = eq || { low: {}, lowMid: {}, highMid: {}, high: {} };
-      const bandKeys = ['low', 'lowMid', 'highMid', 'high'];
       
       ctx.beginPath();
       for (let x = 0; x <= width; x += 2) {
-        const f = getFreq(x); let totalGain = 0;
+        let totalGain = 0;
         bandKeys.forEach(key => {
           const b = bands[key];
-          if (b && b.freq) totalGain += b.gain * Math.exp(-0.5 * Math.pow(b.q * Math.log2(f / b.freq), 2));
+          if (b && b.freq) totalGain += (b.gain || 0) * Math.exp(-0.5 * Math.pow((b.q || 1) * Math.log2(getFreq(x) / b.freq), 2));
         });
-        const y = getY(totalGain);
-        if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        if (x === 0) ctx.moveTo(x, getY(totalGain)); else ctx.lineTo(x, getY(totalGain));
       }
       ctx.lineTo(width, height / 2); ctx.lineTo(0, height / 2);
       ctx.fillStyle = 'rgba(52, 152, 219, 0.3)'; ctx.fill();
       
       ctx.beginPath();
       for (let x = 0; x <= width; x += 2) {
-        const f = getFreq(x); let totalGain = 0;
+        let totalGain = 0;
         bandKeys.forEach(key => {
           const b = bands[key];
-          if (b && b.freq) totalGain += b.gain * Math.exp(-0.5 * Math.pow(b.q * Math.log2(f / b.freq), 2));
+          if (b && b.freq) totalGain += (b.gain || 0) * Math.exp(-0.5 * Math.pow((b.q || 1) * Math.log2(getFreq(x) / b.freq), 2));
         });
-        const y = getY(totalGain);
-        if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        if (x === 0) ctx.moveTo(x, getY(totalGain)); else ctx.lineTo(x, getY(totalGain));
       }
       ctx.strokeStyle = '#3498db'; ctx.lineWidth = 2; ctx.stroke();
 
       bandKeys.forEach((key, idx) => {
         const b = bands[key];
         if (b && b.freq) { 
-          ctx.beginPath(); ctx.arc(getX(b.freq), getY(b.gain), 12, 0, Math.PI * 2); 
+          ctx.beginPath(); ctx.arc(getX(b.freq), getY(b.gain || 0), 12, 0, Math.PI * 2); 
           ctx.strokeStyle = bandColors[idx]; ctx.lineWidth = 3; ctx.stroke(); 
         }
       });
@@ -89,22 +182,39 @@ const BigEQDisplay = ({ channelId, eq, rtaEnabled }) => {
   }, [eq, rtaEnabled, channelId]);
 
   return (
-    <div ref={wrapperRef} style={{ flex: 1, minHeight: '180px', width: '100%', background: '#000', border: '1px solid #333', overflow: 'hidden' }}>
-      <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} />
+    <div ref={wrapperRef} style={{ flex: 1, minHeight: '180px', width: '100%', background: '#000', border: '1px solid #333', overflow: 'hidden', cursor: draggingBand ? 'grabbing' : 'crosshair' }}>
+      <canvas ref={canvasRef} style={{ display: 'block', width: '100%', height: '100%' }} onMouseDown={handleMouseDown} onMouseMove={handleMouseMove} onMouseUp={handleMouseUp} onMouseLeave={handleMouseUp} />
     </div>
   );
 };
 
 // ==========================================
-// 2. THE MASTER CONTROL SCREEN (M32 STYLE)
+// 3. THE MASTER CONTROL SCREEN (M32 STYLE)
 // ==========================================
 export const FatChannel = ({ activeTab }) => {
   const dispatch = useDispatch();
   const selectedId = useSelector(state => state.mixer.selectedChannelId);
   const channel = useSelector(state => state.mixer.channels.find(ch => ch.id === selectedId));
   const [rtaEnabled, setRtaEnabled] = useState(false);
+  const [uiState, setUiState] = useState({ polarity: false, delayOn: false, eqOn: true, lrmc: 'LR' });
 
   if (!channel) return null;
+
+  // SAFE DATA EXTRACTION
+  const eq = channel.eq || { low: {}, lowMid: {}, highMid: {}, high: {} };
+  const gate = channel.dynamics || {};
+  const comp = channel.comp || {};
+  
+  const gActive = gate.gateOn || false; const gThresh = gate.gateThreshold ?? -40; const gRange = gate.range ?? 40;
+  const gAttack = gate.attack ?? 8; const gHold = gate.hold ?? 500; const gRelease = gate.release ?? 900;
+  const gType = gate.type ?? 3.0; const gFreq = gate.freq ?? 990.9;
+  
+  const cActive = comp.compOn || false; const cThresh = comp.threshold ?? -10; const cRatio = comp.ratio ?? 2.5; 
+  const cMix = comp.mix ?? 100; const cGain = comp.makeupGain ?? 0; const cAttack = comp.attack ?? 10; 
+  const cHold = comp.hold ?? 50; const cRelease = comp.release ?? 150; const cType = comp.type ?? 3.0; 
+  const cFreq = comp.freq ?? 990.9; const cKnee = comp.knee ?? 1;
+
+  const toggleUi = (key) => setUiState(prev => ({ ...prev, [key]: !prev[key] }));
 
   const handleEqChange = (band, param, value) => {
     const val = param === 'mode' ? value : parseFloat(value);
@@ -114,11 +224,35 @@ export const FatChannel = ({ activeTab }) => {
     }
   };
 
+  const handleGate = (param, val) => {
+    const parsed = typeof val === 'boolean' || isNaN(val) ? val : parseFloat(val);
+    dispatch(updateParam({ channelId: channel.id, key: 'dynamics', value: { ...gate, [param]: parsed } }));
+  };
+
+  const handleComp = (param, val) => {
+    const parsed = typeof val === 'boolean' || isNaN(val) ? val : parseFloat(val);
+    dispatch(updateParam({ channelId: channel.id, key: 'comp', value: { ...comp, [param]: parsed } }));
+  };
+
   const handlePan = (e) => {
     const val = parseFloat(e.target.value);
     dispatch(updateParam({ channelId: channel.id, key: 'pan', value: val }));
     if (audioEngine.ctx) {
       try { const engineChannel = audioEngine.getChannel(channel.id); if (engineChannel && typeof engineChannel.setPan === 'function') engineChannel.setPan(val); } catch(err) {}
+    }
+  };
+
+  const handleTrim = (e) => dispatch(updateParam({ channelId: channel.id, key: 'trim', value: parseFloat(e.target.value) || 0 }));
+
+  const handleSourceChange = (e) => {
+    const sourceId = parseInt(e.target.value, 10);
+    dispatch(updateParam({ channelId: channel.id, key: 'source', value: sourceId }));
+    if (audioEngine.ctx) {
+      try {
+        if (typeof audioEngine.routeInputToChannel === 'function') {
+          audioEngine.routeInputToChannel(sourceId, channel.id);
+        }
+      } catch(err) { console.error("Patchbay routing error:", err); }
     }
   };
 
@@ -184,7 +318,7 @@ export const FatChannel = ({ activeTab }) => {
                 <div style={{ fontSize: '11px', fontWeight: 'bold', color: '#ccc', margin: '4px 0 8px 0' }}>{val <= -60 ? '-oo' : val.toFixed(1)}</div>
                 <div style={{ flex: 1, display: 'flex', justifyContent: 'center', gap: '2px', height: '140px', width: '100%' }}>
                   {isEven && (<div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '7px', color: '#555', textAlign: 'right', paddingRight: '2px' }}><span>10</span><span>0</span><span>-10</span><span>-20</span><span>-30</span><span>-oo</span></div>)}
-                  <input type="range" min="-60" max="10" step="0.5" value={val} onChange={(e) => handleSendChange(i, e.target.value)} style={{ height: '100%', width: '16px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555', cursor: 'grab' }} />
+                  <input type="range" min="-60" max="10" step="0.5" value={val} onChange={(e) => handleSendChange(i, e.target.value)} onDoubleClick={() => handleSendChange(i, -80)} style={{ height: '100%', width: '16px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555', cursor: 'grab' }} />
                   {!isEven && (<div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '7px', color: '#555', textAlign: 'left', paddingLeft: '2px' }}><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span><span>—</span></div>)}
                 </div>
                 <div style={{ fontSize: '10px', color: '#aaa', marginTop: '8px', fontWeight: 'bold' }}>Bus {i+1}</div>
@@ -203,6 +337,7 @@ export const FatChannel = ({ activeTab }) => {
     );
   };
 
+  // --- TAB COMPONENT: EQ ---
   const renderEQTab = () => {
     const bandColors = ['#1abc9c', '#3498db', '#e84393', '#e67e22'];
     const bandLabels = ['Low', 'LoMid', 'HiMid', 'High'];
@@ -212,7 +347,7 @@ export const FatChannel = ({ activeTab }) => {
       <div style={{ display: 'flex', alignItems: 'center', marginBottom: '4px' }}>
         <div style={{ width: '35px', textAlign: 'right', marginRight: '8px', color: '#ccc', fontSize: '11px' }}>{label}</div>
         <div style={{ flex: 1, display: 'flex', background: '#000', border: '1px solid #333' }}>
-          <input type="number" step={step} min={min} max={max} value={value} onChange={(e) => onChange(e.target.value)} style={{ width: '100%', background: 'transparent', border: 'none', color: color, padding: '2px', fontSize: '11px', textAlign: 'right', outline: 'none', MozAppearance: 'textfield', WebkitAppearance: 'none', margin: 0 }} />
+          <input type="number" step={step} min={min} max={max} value={value} onChange={(e) => onChange(e.target.value)} onDoubleClick={() => onChange(label === 'Gain' ? 0 : value)} style={{ width: '100%', background: 'transparent', border: 'none', color: color, padding: '2px', fontSize: '11px', textAlign: 'right', outline: 'none', MozAppearance: 'textfield', WebkitAppearance: 'none', margin: 0 }} />
           <span style={{ color: '#fff', fontSize: '11px', padding: '2px 4px 2px 2px', width: '20px', textAlign: 'left' }}>{unit}</span>
         </div>
       </div>
@@ -220,11 +355,11 @@ export const FatChannel = ({ activeTab }) => {
 
     return (
       <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: '10px' }}>
-        <BigEQDisplay channelId={channel.id} eq={channel.eq} rtaEnabled={rtaEnabled} />
+        <BigEQDisplay channelId={channel.id} eq={eq} rtaEnabled={rtaEnabled} onBandChange={handleEqChange} />
         <div style={{ display: 'flex', gap: '8px', height: '140px', paddingBottom: '10px' }}>
           <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'flex-start', minWidth: '90px' }}>
             <div style={{ display: 'flex', gap: '5px' }}>
-              <button style={{ ...powerBtnOn, flex: 1, padding: '4px' }}>EQ</button>
+              <button onClick={() => toggleUi('eqOn')} style={{ ...(uiState.eqOn ? powerBtnOn : powerBtnOff), flex: 1, padding: '4px' }}>EQ</button>
               <button style={{ ...powerBtnOff, flex: 1, padding: '4px', background: '#444' }}>RESET</button>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', marginTop: '15px' }}>
@@ -236,7 +371,7 @@ export const FatChannel = ({ activeTab }) => {
           <div style={{ display: 'flex', flex: 1, gap: '4px' }}>
             {bandKeys.map((band, idx) => {
               const data = channel.eq[band]; const c = bandColors[idx];
-              const mode = data.mode || (idx === 0 ? 'LShv' : idx === 3 ? 'HShv' : 'PEQ');
+              const mode = data?.mode || (idx === 0 ? 'LShv' : idx === 3 ? 'HShv' : 'PEQ');
               return (
                 <div key={band} style={{ flex: 1, background: '#111', border: '1px solid #333', padding: '6px', display: 'flex', flexDirection: 'column' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: `2px solid ${c}`, paddingBottom: '4px', marginBottom: '8px' }}>
@@ -249,9 +384,9 @@ export const FatChannel = ({ activeTab }) => {
                       <option value="LCut">LCut</option><option value="LShv">LShv</option><option value="PEQ">PEQ</option><option value="VEQ">VEQ</option><option value="HShv">HShv</option><option value="HCut">HCut</option>
                     </select>
                   </div>
-                  <NumberInput label="Gain" value={data.gain} unit="dB" step="0.5" min="-15" max="15" onChange={(val) => handleEqChange(band, 'gain', val)} color="#0984e3" />
-                  <NumberInput label="Freq" value={data.freq} unit="Hz" step="10" min="20" max="20000" onChange={(val) => handleEqChange(band, 'freq', val)} color="#0984e3" />
-                  <NumberInput label="Qual" value={data.q} unit="" step="0.1" min="0.1" max="10" onChange={(val) => handleEqChange(band, 'q', val)} color="#0984e3" />
+                  <NumberInput label="Gain" value={data?.gain ?? 0} unit="dB" step="0.5" min="-15" max="15" onChange={(val) => handleEqChange(band, 'gain', val)} color="#0984e3" />
+                  <NumberInput label="Freq" value={data?.freq ?? 100} unit="Hz" step="10" min="20" max="20000" onChange={(val) => handleEqChange(band, 'freq', val)} color="#0984e3" />
+                  <NumberInput label="Qual" value={data?.q ?? 1} unit="" step="0.1" min="0.1" max="10" onChange={(val) => handleEqChange(band, 'q', val)} color="#0984e3" />
                 </div>
               );
             })}
@@ -277,18 +412,19 @@ export const FatChannel = ({ activeTab }) => {
     );
   };
 
+  // --- TAB COMPONENT: CHANNEL HOME ---
   const renderChannelTab = () => (
     <div style={{ display: 'flex', gap: '4px', height: '100%', overflowX: 'auto' }}>
       <div className="m32-col" style={colStyle}>
         <div style={headerStyle}>Channel Input</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '10px' }}><div style={{ width: '20px', height: '20px', background: '#e67e22', color: '#000', fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '2px', fontSize: '10px' }}>L</div><span style={{ fontSize: '11px', color: '#ccc' }}>Stereo Link</span></div>
         <div style={{ padding: '0 10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><div style={iconBtn}>Ø</div><span style={{fontSize: '11px', color: '#ccc'}}>Polarity</span></div>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><div style={iconBtn}>Δt</div><span style={{fontSize: '11px', color: '#ccc'}}>Delay</span></div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><div onClick={() => toggleUi('polarity')} style={{...iconBtn, background: uiState.polarity ? '#e67e22' : '#222', color: uiState.polarity ? '#000' : '#888'}}>Ø</div><span style={{fontSize: '11px', color: '#ccc'}}>Polarity</span></div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><div onClick={() => toggleUi('delayOn')} style={{...iconBtn, background: uiState.delayOn ? '#0984e3' : '#222', color: uiState.delayOn ? '#fff' : '#888'}}>Δt</div><span style={{fontSize: '11px', color: '#ccc'}}>Delay</span></div>
         </div>
         <div style={{ flex: 1, display: 'flex', marginTop: '15px', padding: '0 10px', gap: '15px' }}>
           <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', height: '100%' }}>
-            <input type="range" min="-18" max="18" defaultValue="0" style={{ height: '100px', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+            <input type="range" min="-18" max="18" step="0.5" value={channel.trim || 0} onChange={handleTrim} onDoubleClick={() => handleTrim({target: {value: 0}})} style={{ height: '100px', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
             <div style={{ fontSize: '10px', color: '#ccc', marginTop: '5px' }}>Trim</div>
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '15px' }}>
@@ -300,30 +436,30 @@ export const FatChannel = ({ activeTab }) => {
       </div>
       <div className="m32-col" style={colStyle}>
         <div style={headerStyle}>Noise Gate</div>
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '5px' }}><button style={powerBtnOff}>Gate</button></div>
-        <div style={graphBox}><svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}><path d="M 10 90 L 50 90 L 90 10" stroke="#666" strokeWidth="2" fill="none"/></svg></div>
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '5px' }}><button onClick={() => handleGate('gateOn', !gActive)} style={gActive ? powerBtnOn : powerBtnOff}>Gate</button></div>
+        <div style={graphBox}><GateCurve thresh={gThresh} range={gRange} active={gActive} /></div>
         <div style={{ display: 'flex', justifyContent: 'space-around', padding: '10px', height: '100px' }}>
-           <input type="range" min="-80" max="0" defaultValue="-40" style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
+           <input type="range" min="-80" max="0" value={gThresh} onChange={(e) => handleGate('gateThreshold', e.target.value)} onDoubleClick={() => handleGate('gateThreshold', -40)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
            <div style={{ width: '10px', background: '#0a0a0c', border: '1px solid #222' }}></div>
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-around', fontSize: '10px', color: '#888' }}><span>Threshold</span><span>GR</span></div>
       </div>
       <div className="m32-col" style={colStyle}>
         <div style={headerStyle}>Equalizer</div>
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '5px' }}><button style={powerBtnOn}>EQ</button></div>
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '5px' }}><button onClick={() => toggleUi('eqOn')} style={uiState.eqOn ? powerBtnOn : powerBtnOff}>EQ</button></div>
         <div style={{ ...graphBox, borderColor: '#0984e3' }}>
-          <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}><path d="M 0 50 Q 25 50 30 70 T 50 50 T 70 30 T 100 50" stroke="#0984e3" strokeWidth="2" fill="none"/><path d="M 0 50 Q 25 50 30 70 T 50 50 T 70 30 T 100 50" stroke="none" fill="rgba(9, 132, 227, 0.2)"/></svg>
+          <MiniEQCurve eq={eq} />
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '5px 10px' }}><div style={{ width: '15px', height: '15px', background: '#17a2b8' }}></div><span style={{ fontSize: '11px', color: '#ccc' }}>Low Cut</span></div>
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '5px', height: '80px' }}><input type="range" min="20" max="400" defaultValue="20" style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} /></div>
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '5px', height: '80px' }}><input type="range" min="20" max="400" value={eq.low?.freq ?? 20} onChange={(e) => handleEqChange('low', 'freq', e.target.value)} onDoubleClick={() => handleEqChange('low', 'freq', 20)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} /></div>
         <div style={{ textAlign: 'center', fontSize: '10px', color: '#888' }}>Frequency</div>
       </div>
       <div className="m32-col" style={colStyle}>
         <div style={headerStyle}>Dynamics</div>
-        <div style={{ display: 'flex', justifyContent: 'center', padding: '5px' }}><button style={powerBtnOff}>Comp</button></div>
-        <div style={graphBox}><svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}><path d="M 10 90 L 50 50 L 90 20" stroke="#666" strokeWidth="2" fill="none"/></svg></div>
+        <div style={{ display: 'flex', justifyContent: 'center', padding: '5px' }}><button onClick={() => handleComp('compOn', !cActive)} style={cActive ? powerBtnOn : powerBtnOff}>Comp</button></div>
+        <div style={graphBox}><CompCurve thresh={cThresh} ratio={cRatio} active={cActive} /></div>
         <div style={{ display: 'flex', justifyContent: 'space-around', padding: '10px', height: '100px' }}>
-           <input type="range" min="-60" max="0" defaultValue="-10" style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
+           <input type="range" min="-60" max="0" value={cThresh} onChange={(e) => handleComp('threshold', e.target.value)} onDoubleClick={() => handleComp('threshold', -10)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
            <div style={{ width: '10px', background: '#0a0a0c', border: '1px solid #222' }}></div>
         </div>
         <div style={{ display: 'flex', justifyContent: 'space-around', fontSize: '10px', color: '#888' }}><span>Threshold</span><span>GR</span></div>
@@ -332,7 +468,7 @@ export const FatChannel = ({ activeTab }) => {
         <div style={headerStyle}>Main Out</div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '5px' }}><button style={{ background: '#e67e22', color: '#000', border: 'none', padding: '2px 4px', fontWeight: 'bold', borderRadius: '2px' }}>LR</button><span style={{ fontSize: '11px', color: '#ccc' }}>Main Stereo</span></div>
         <div style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '5px' }}><button style={{ background: '#333', color: '#666', border: 'none', padding: '2px 4px', fontWeight: 'bold', borderRadius: '2px' }}>M/C</button><span style={{ fontSize: '11px', color: '#ccc' }}>Mono/Center</span></div>
-        <div style={{ padding: '10px' }}><input type="range" min="-100" max="100" value={channel.pan} onChange={handlePan} style={{ width: '100%', accentColor: '#0984e3' }} /><div style={{ textAlign: 'right', fontSize: '10px', color: '#ccc' }}>{channel.pan}</div></div>
+        <div style={{ padding: '10px' }}><input type="range" min="-100" max="100" value={channel.pan} onChange={handlePan} onDoubleClick={() => handlePan({target: {value: 0}})} style={{ width: '100%', accentColor: '#0984e3' }} /><div style={{ textAlign: 'right', fontSize: '10px', color: '#ccc' }}>{channel.pan}</div></div>
         <div style={{ padding: '0 10px', display: 'flex', flexDirection: 'column', gap: '10px' }}>
            <div><div style={{ fontSize: '10px', color: '#ccc', fontWeight: 'bold', marginBottom: '5px' }}>DCA Groups</div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '4px' }}>{[1,2,3,4,5,6,7,8].map(i => <div key={i} style={dcaCircle}>{i}</div>)}</div></div>
            <div><div style={{ fontSize: '10px', color: '#ccc', fontWeight: 'bold', marginBottom: '5px' }}>Mute Groups</div><div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '4px' }}>{[1,2,3,4,5,6].map(i => <div key={i} style={muteSquare}>{i}</div>)}</div></div>
@@ -352,67 +488,78 @@ export const FatChannel = ({ activeTab }) => {
     </div>
   );
 
-  const renderConfigTab = () => (
-    <div style={{ display: 'flex', height: '100%', padding: '20px', gap: '40px', color: '#eee' }}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '30px', marginTop: '40px' }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><div style={{ width: '24px', height: '24px', background: '#f1c40f', color: '#000', fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '2px', fontSize: '12px' }}>L</div><span style={{ fontSize: '12px', fontWeight: 'bold' }}>Stereo Link</span></div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><div style={iconBtn}>Ø</div><span style={{ fontSize: '12px', fontWeight: 'bold' }}>Polarity</span></div>
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
-        <div style={{ fontSize: '12px', fontWeight: 'bold' }}>Source</div>
-        <select style={{ background: '#111', color: '#fff', border: '1px solid #333', padding: '4px', fontSize: '12px', width: '100px', textAlign: 'center' }}><option>03 : A03</option></select>
-        <div style={{ fontSize: '12px', marginTop: '10px' }}>+0.0 dB</div>
-        <div style={{ display: 'flex', gap: '10px', height: '120px', alignItems: 'center' }}>
-           <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', height: '100%', fontSize: '9px', color: '#888', textAlign: 'right' }}><span>18</span><span>12</span><span>+6</span><span></span><span>-6</span><span>-12</span><span>-18</span></div>
-           <input type="range" min="-18" max="18" defaultValue="0" style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
-        </div>
-        <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Trim</div>
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
-        <div style={{ fontSize: '12px', fontWeight: 'bold' }}>Low Cut</div>
-        <button style={{ width: '30px', height: '30px', background: '#17a2b8', border: 'none', borderRadius: '2px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><svg viewBox="0 0 24 24" width="16" height="16" stroke="#000" strokeWidth="2" fill="none"><path d="M 4 20 L 10 20 L 16 4 L 22 4" /></svg></button>
-        <div style={{ fontSize: '12px', marginTop: '10px' }}>20 Hz</div>
-        <div style={{ display: 'flex', gap: '10px', height: '120px', alignItems: 'center' }}>
-           <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', height: '100%', fontSize: '9px', color: '#888', textAlign: 'right' }}><span>230 Hz</span><span>140 Hz</span><span>90 Hz</span><span>60 Hz</span><span>40 Hz</span><span>20 Hz</span></div>
-           <input type="range" min="20" max="400" defaultValue="20" style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
-        </div>
-        <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Frequency</div>
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
-        <div style={{ fontSize: '12px', fontWeight: 'bold' }}>Delay</div>
-        <button style={{ ...iconBtn, width: '30px', height: '30px' }}>Δt</button>
-        <div style={{ fontSize: '10px', marginTop: '10px', textAlign: 'center', color: '#ccc', lineHeight: '1.4' }}>0.3 ft<br/>0.10 m<br/>0.3 ms</div>
-        <div style={{ display: 'flex', gap: '10px', height: '120px', alignItems: 'center' }}><input type="range" min="0" max="500" defaultValue="0.3" style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} /></div>
-        <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Delay</div>
-      </div>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', marginLeft: '20px' }}>
-        <div style={{ fontSize: '12px', fontWeight: 'bold', textAlign: 'center' }}>Insert Position</div>
-        <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
-           <div style={insertBlock}><span style={{fontSize:'10px'}}>Δt</span></div>
-           <div style={insertBlock}><svg viewBox="0 0 24 24" width="16" height="16" stroke="#888" strokeWidth="2" fill="none"><path d="M 4 20 L 10 20 L 16 4 L 22 4"/></svg></div>
-           <div style={insertBlock}><svg viewBox="0 0 24 24" width="16" height="16" stroke="#888" strokeWidth="2" fill="none"><path d="M 4 20 L 10 10 L 20 5"/></svg></div>
-           <div style={{...insertBlock, borderColor: '#0984e3', position: 'relative'}}>
-             <svg viewBox="0 0 24 24" width="16" height="16" stroke="#0984e3" strokeWidth="2" fill="none"><path d="M 2 12 Q 8 2 12 12 T 22 12"/></svg>
-             <div style={{ position: 'absolute', bottom: '-15px', color: '#0984e3', fontSize: '14px' }}>↑</div>
-           </div>
-           <div style={insertBlock}><svg viewBox="0 0 24 24" width="16" height="16" stroke="#888" strokeWidth="2" fill="none"><path d="M 4 20 L 10 10 L 20 5"/></svg></div>
-        </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px' }}>
-           <div style={{ background: '#333', color: '#888', padding: '4px', borderRadius: '2px', fontSize: '10px', fontWeight: 'bold' }}>FX</div>
-           <select style={{ background: '#111', color: '#fff', border: '1px solid #333', padding: '6px', fontSize: '12px', flex: 1 }}><option>OFF</option></select>
-           <button style={{ background: '#17a2b8', color: '#000', border: 'none', padding: '6px 10px', borderRadius: '2px', fontSize: '10px', fontWeight: 'bold' }}>PRE</button>
-        </div>
-      </div>
-    </div>
-  );
+  // --- TAB COMPONENT: CONFIG ---
+  const renderConfigTab = () => {
+    const sourceOptions = Array.from({ length: 32 }, (_, i) => {
+      const num = (i + 1).toString().padStart(2, '0');
+      return `${num} : IN${num}`;
+    });
 
+    const currentSource = channel.source || `${channel.id.toString().padStart(2, '0')} : IN${channel.id.toString().padStart(2, '0')}`;
+
+    return (
+      <div style={{ display: 'flex', height: '100%', padding: '20px', gap: '40px', color: '#eee' }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '30px', marginTop: '40px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><div style={{ width: '24px', height: '24px', background: '#f1c40f', color: '#000', fontWeight: 'bold', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '2px', fontSize: '12px' }}>L</div><span style={{ fontSize: '12px', fontWeight: 'bold' }}>Stereo Link</span></div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}><div onClick={() => toggleUi('polarity')} style={{...iconBtn, background: uiState.polarity ? '#e67e22' : 'transparent', color: uiState.polarity ? '#000' : '#888'}}>Ø</div><span style={{ fontSize: '12px', fontWeight: 'bold' }}>Polarity</span></div>
+        </div>
+        
+        {/* NEW: Input Source Router */}
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+          <div style={{ fontSize: '12px', fontWeight: 'bold' }}>Source</div>
+          <select value={currentSource} onChange={handleSourceChange} style={{ background: '#111', color: '#fff', border: '1px solid #333', padding: '4px', fontSize: '12px', width: '100px', textAlign: 'center', outline: 'none' }}>
+            {sourceOptions.map(opt => <option key={opt} value={opt}>{opt}</option>)}
+          </select>
+          
+          <div style={{ fontSize: '12px', marginTop: '10px' }}>{(channel.trim || 0).toFixed(1)} dB</div>
+          <div style={{ display: 'flex', gap: '10px', height: '120px', alignItems: 'center' }}>
+             <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', height: '100%', fontSize: '9px', color: '#888', textAlign: 'right' }}><span>18</span><span>12</span><span>+6</span><span></span><span>-6</span><span>-12</span><span>-18</span></div>
+             <input type="range" min="-18" max="18" step="0.5" value={channel.trim || 0} onChange={handleTrim} onDoubleClick={() => handleTrim({target: {value: 0}})} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+          </div>
+          <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Trim</div>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+          <div style={{ fontSize: '12px', fontWeight: 'bold' }}>Low Cut</div>
+          <button style={{ width: '30px', height: '30px', background: '#17a2b8', border: 'none', borderRadius: '2px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><svg viewBox="0 0 24 24" width="16" height="16" stroke="#000" strokeWidth="2" fill="none"><path d="M 4 20 L 10 20 L 16 4 L 22 4" /></svg></button>
+          <div style={{ fontSize: '12px', marginTop: '10px' }}>{eq.low?.freq ?? 20} Hz</div>
+          <div style={{ display: 'flex', gap: '10px', height: '120px', alignItems: 'center' }}>
+             <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', height: '100%', fontSize: '9px', color: '#888', textAlign: 'right' }}><span>230 Hz</span><span>140 Hz</span><span>90 Hz</span><span>60 Hz</span><span>40 Hz</span><span>20 Hz</span></div>
+             <input type="range" min="20" max="400" value={eq.low?.freq ?? 20} onChange={(e) => handleEqChange('low', 'freq', e.target.value)} onDoubleClick={() => handleEqChange('low', 'freq', 20)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
+          </div>
+          <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Frequency</div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '10px' }}>
+          <div style={{ fontSize: '12px', fontWeight: 'bold' }}>Delay</div>
+          <button onClick={() => toggleUi('delayOn')} style={{ ...iconBtn, width: '30px', height: '30px', background: uiState.delayOn ? '#0984e3' : '#222', color: uiState.delayOn ? '#fff' : '#888' }}>Δt</button>
+          <div style={{ fontSize: '10px', marginTop: '10px', textAlign: 'center', color: '#ccc', lineHeight: '1.4' }}>0.3 ft<br/>0.10 m<br/>0.3 ms</div>
+          <div style={{ display: 'flex', gap: '10px', height: '120px', alignItems: 'center' }}><input type="range" min="0" max="500" defaultValue="0.3" style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} /></div>
+          <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Delay</div>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', marginLeft: '20px' }}>
+          <div style={{ fontSize: '12px', fontWeight: 'bold', textAlign: 'center' }}>Insert Position</div>
+          <div style={{ display: 'flex', gap: '5px', alignItems: 'center' }}>
+             <div style={insertBlock}><span style={{fontSize:'10px'}}>Δt</span></div>
+             <div style={insertBlock}><svg viewBox="0 0 24 24" width="16" height="16" stroke="#888" strokeWidth="2" fill="none"><path d="M 4 20 L 10 20 L 16 4 L 22 4"/></svg></div>
+             <div style={insertBlock}><svg viewBox="0 0 24 24" width="16" height="16" stroke="#888" strokeWidth="2" fill="none"><path d="M 4 20 L 10 10 L 20 5"/></svg></div>
+             <div style={{...insertBlock, borderColor: '#0984e3', position: 'relative'}}>
+               <svg viewBox="0 0 24 24" width="16" height="16" stroke="#0984e3" strokeWidth="2" fill="none"><path d="M 2 12 Q 8 2 12 12 T 22 12"/></svg>
+               <div style={{ position: 'absolute', bottom: '-15px', color: '#0984e3', fontSize: '14px' }}>↑</div>
+             </div>
+             <div style={insertBlock}><svg viewBox="0 0 24 24" width="16" height="16" stroke="#888" strokeWidth="2" fill="none"><path d="M 4 20 L 10 10 L 20 5"/></svg></div>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '10px' }}>
+             <div style={{ background: '#333', color: '#888', padding: '4px', borderRadius: '2px', fontSize: '10px', fontWeight: 'bold' }}>FX</div>
+             <select style={{ background: '#111', color: '#fff', border: '1px solid #333', padding: '6px', fontSize: '12px', flex: 1 }}><option>OFF</option></select>
+             <button style={{ background: '#17a2b8', color: '#000', border: 'none', padding: '6px 10px', borderRadius: '2px', fontSize: '10px', fontWeight: 'bold' }}>PRE</button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // --- TAB COMPONENT: GATE ---
   const renderGateTab = () => {
-    const gate = channel.dynamics || {};
-    const handleGate = (param, val) => { dispatch(updateParam({ channelId: channel.id, key: 'dynamics', value: { ...gate, [param]: parseFloat(val) } })); };
-    const gActive = gate.gateOn || false; const gThresh = gate.gateThreshold !== undefined ? gate.gateThreshold : -29.5;
-    const gRange = gate.range || 41.0; const gAttack = gate.attack || 8; const gHold = gate.hold || 502; const gRelease = gate.release || 983;
-    const gType = gate.type || 3.0; const gFreq = gate.freq || 990.9;
-
     return (
       <div style={{ display: 'flex', height: '100%', padding: '20px', gap: '40px', color: '#eee' }}>
         <div style={{ display: 'flex', gap: '20px' }}>
@@ -421,7 +568,7 @@ export const FatChannel = ({ activeTab }) => {
             <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '10px' }}>Gain</div>
             <div style={{ display: 'flex', gap: '10px' }}>
               <div style={{ width: '150px', height: '100px', background: '#0a0a0c', border: '1px solid #333' }}>
-                <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}><path d={`M 20 90 L 40 90 L 50 30 L 90 30`} stroke={gActive ? '#0984e3' : '#666'} strokeWidth="2" fill="none" /></svg>
+                <GateCurve thresh={gThresh} range={gRange} active={gActive} />
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', gap: '5px', fontSize: '11px', color: '#ccc' }}>
                 {['Exp 2:1', 'Exp 3:1', 'Exp 4:1', 'Gate', 'Ducker'].map(mode => (
@@ -435,7 +582,7 @@ export const FatChannel = ({ activeTab }) => {
                 <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{gThresh.toFixed(1)} dB</div>
                 <div style={{ display: 'flex', gap: '10px', height: '100%' }}>
                   <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '9px', color: '#888', textAlign: 'right' }}><span>-10</span><span>-20</span><span>-30</span><span>-40</span><span>-50</span><span>-60</span><span>-70</span><span>-80</span></div>
-                  <input type="range" min="-80" max="0" value={gThresh} onChange={(e) => handleGate('gateThreshold', e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
+                  <input type="range" min="-80" max="0" value={gThresh} onChange={(e) => handleGate('gateThreshold', e.target.value)} onDoubleClick={() => handleGate('gateThreshold', -40)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
                 </div>
                 <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Threshold</div>
               </div>
@@ -450,7 +597,7 @@ export const FatChannel = ({ activeTab }) => {
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                 <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{gRange.toFixed(1)} dB</div>
                 <div style={{ display: 'flex', gap: '10px', height: '100%' }}>
-                  <input type="range" min="0" max="60" value={gRange} onChange={(e) => handleGate('range', e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+                  <input type="range" min="0" max="60" value={gRange} onChange={(e) => handleGate('range', e.target.value)} onDoubleClick={() => handleGate('range', 40)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
                   <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '9px', color: '#888', textAlign: 'left' }}><span>60</span><span>50</span><span>40</span><span>30</span><span>20</span><span>10</span><span>0</span></div>
                 </div>
                 <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Range</div>
@@ -461,17 +608,13 @@ export const FatChannel = ({ activeTab }) => {
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
           <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '10px' }}>Gain Envelope</div>
           <div style={{ width: '180px', height: '100px', background: '#0a0a0c', border: '1px solid #333', position: 'relative' }}>
-            <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}>
-              <path d="M 20 90 L 30 30 L 60 30 L 80 90" stroke="#0984e3" strokeWidth="2" fill="rgba(9, 132, 227, 0.4)" />
-              <line x1="30" y1="0" x2="30" y2="100" stroke="#0984e3" strokeWidth="1" />
-              <line x1="60" y1="0" x2="60" y2="100" stroke="#0984e3" strokeWidth="1" />
-            </svg>
+            <EnvelopeGraph a={gAttack} h={gHold} r={gRelease} isComp={false} />
           </div>
           <div style={{ display: 'flex', gap: '20px', marginTop: '20px', height: '140px' }}>
             {[{ label: 'Attack', val: gAttack, min: 0, max: 120, unit: 'ms' }, { label: 'Hold', val: gHold, min: 0, max: 2000, unit: 'ms' }, { label: 'Release', val: gRelease, min: 5, max: 4000, unit: 'ms' }].map(ctrl => (
               <div key={ctrl.label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                 <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{ctrl.val} {ctrl.unit}</div>
-                <input type="range" min={ctrl.min} max={ctrl.max} value={ctrl.val} onChange={(e) => handleGate(ctrl.label.toLowerCase(), e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+                <input type="range" min={ctrl.min} max={ctrl.max} value={ctrl.val} onChange={(e) => handleGate(ctrl.label.toLowerCase(), e.target.value)} onDoubleClick={() => handleGate(ctrl.label.toLowerCase(), ctrl.min + (ctrl.max - ctrl.min) / 2)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
                 <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>{ctrl.label}</div>
               </div>
             ))}
@@ -493,12 +636,12 @@ export const FatChannel = ({ activeTab }) => {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', justifyContent: 'center' }}><button style={powerBtnOff}>Filter</button><button style={powerBtnOff}>Solo</button></div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
               <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{gType.toFixed(1)}</div>
-              <input type="range" min="1" max="10" step="0.1" value={gType} onChange={(e) => handleGate('type', e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+              <input type="range" min="1" max="10" step="0.1" value={gType} onChange={(e) => handleGate('type', e.target.value)} onDoubleClick={() => handleGate('type', 3.0)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
               <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Type</div>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
               <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{gFreq.toFixed(1)} Hz</div>
-              <input type="range" min="20" max="20000" step="10" value={gFreq} onChange={(e) => handleGate('freq', e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+              <input type="range" min="20" max="20000" step="10" value={gFreq} onChange={(e) => handleGate('freq', e.target.value)} onDoubleClick={() => handleGate('freq', 990)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
               <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Frequency</div>
             </div>
           </div>
@@ -507,15 +650,8 @@ export const FatChannel = ({ activeTab }) => {
     );
   };
 
+  // --- TAB COMPONENT: DYNAMICS (COMPRESSOR) ---
   const renderDynTab = () => {
-    const comp = channel.comp || {};
-    const handleComp = (param, val) => { dispatch(updateParam({ channelId: channel.id, key: 'comp', value: { ...comp, [param]: typeof val === 'number' ? val : parseFloat(val) || val } })); };
-    const cActive = comp.compOn || false; const cThresh = comp.threshold !== undefined ? comp.threshold : -6.0;
-    const cRatio = comp.ratio || 2.5; const cMix = comp.mix || 90; const cGain = comp.makeupGain || 0.5;
-    const cAttack = comp.attack || 0; const cHold = comp.hold || 0.14; const cRelease = comp.release || 8;
-    const cType = comp.type || 3.0; const cFreq = comp.freq || 990.9; const cKnee = comp.knee !== undefined ? comp.knee : 1;
-    const cMode = comp.mode || 'Comp'; const cEnv = comp.env || 'Log'; const cDet = comp.det || 'Peak';
-
     return (
       <div style={{ display: 'flex', height: '100%', padding: '20px', gap: '40px', color: '#eee' }}>
         <div style={{ display: 'flex', gap: '20px' }}>
@@ -525,11 +661,11 @@ export const FatChannel = ({ activeTab }) => {
             <div style={{ display: 'flex', gap: '15px' }}>
               <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                 <div style={{ width: '130px', height: '90px', background: '#0a0a0c', border: '1px solid #333' }}>
-                  <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}><path d={`M 10 90 L 50 50 Q 60 40 90 30`} stroke={cActive ? '#0984e3' : '#666'} strokeWidth="2" fill="none" /></svg>
+                  <CompCurve thresh={cThresh} ratio={cRatio} active={cActive} />
                 </div>
                 <div style={{ display: 'flex', gap: '15px', marginTop: '10px', fontSize: '11px', color: '#ccc' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compMode" checked={cMode === 'Comp'} onChange={() => handleComp('mode', 'Comp')} style={{ accentColor: '#0984e3' }} /> Comp</label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compMode" checked={cMode === 'Exp'} onChange={() => handleComp('mode', 'Exp')} style={{ accentColor: '#0984e3' }} /> Exp</label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compMode" checked={comp.mode !== 'Exp'} onChange={() => handleComp('mode', 'Comp')} style={{ accentColor: '#0984e3' }} /> Comp</label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compMode" checked={comp.mode === 'Exp'} onChange={() => handleComp('mode', 'Exp')} style={{ accentColor: '#0984e3' }} /> Exp</label>
                 </div>
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '10px', color: '#ccc' }}>
@@ -538,12 +674,12 @@ export const FatChannel = ({ activeTab }) => {
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: '15px', fontSize: '10px', color: '#ccc', marginLeft: '5px' }}>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compEnv" checked={cEnv === 'Lin'} onChange={() => handleComp('env', 'Lin')} style={{ margin: 0, accentColor: '#0984e3' }}/> Lin</label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compEnv" checked={cEnv === 'Log'} onChange={() => handleComp('env', 'Log')} style={{ margin: 0, accentColor: '#0984e3' }}/> Log</label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compEnv" checked={comp.env !== 'Log'} onChange={() => handleComp('env', 'Lin')} style={{ margin: 0, accentColor: '#0984e3' }}/> Lin</label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compEnv" checked={comp.env === 'Log'} onChange={() => handleComp('env', 'Log')} style={{ margin: 0, accentColor: '#0984e3' }}/> Log</label>
                 </div>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compDet" checked={cDet === 'Peak'} onChange={() => handleComp('det', 'Peak')} style={{ margin: 0, accentColor: '#0984e3' }}/> Peak</label>
-                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compDet" checked={cDet === 'RMS'} onChange={() => handleComp('det', 'RMS')} style={{ margin: 0, accentColor: '#0984e3' }}/> RMS</label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compDet" checked={comp.det !== 'RMS'} onChange={() => handleComp('det', 'Peak')} style={{ margin: 0, accentColor: '#0984e3' }}/> Peak</label>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer' }}><input type="radio" name="compDet" checked={comp.det === 'RMS'} onChange={() => handleComp('det', 'RMS')} style={{ margin: 0, accentColor: '#0984e3' }}/> RMS</label>
                 </div>
               </div>
             </div>
@@ -552,7 +688,7 @@ export const FatChannel = ({ activeTab }) => {
                 <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{cThresh.toFixed(1)} dB</div>
                 <div style={{ display: 'flex', gap: '10px', height: '100%' }}>
                   <div style={{ display: 'flex', flexDirection: 'column', justifyContent: 'space-between', fontSize: '9px', color: '#888', textAlign: 'right' }}><span>-10</span><span>-20</span><span>-30</span><span>-40</span><span>-50</span><span>-60</span></div>
-                  <input type="range" min="-60" max="0" step="0.5" value={cThresh} onChange={(e) => handleComp('threshold', e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
+                  <input type="range" min="-60" max="0" step="0.5" value={cThresh} onChange={(e) => handleComp('threshold', e.target.value)} onDoubleClick={() => handleComp('threshold', -10)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#555' }} />
                 </div>
                 <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Threshold</div>
               </div>
@@ -567,7 +703,7 @@ export const FatChannel = ({ activeTab }) => {
               {[{ label: 'Ratio', val: cRatio, min: 1, max: 20, step: 0.5, unit: '' }, { label: 'Mix', val: cMix, min: 0, max: 100, step: 1, unit: '%' }, { label: 'Gain', val: cGain, min: 0, max: 24, step: 0.5, unit: 'dB' }].map(ctrl => (
                 <div key={ctrl.label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                   <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{ctrl.val.toFixed(1)} {ctrl.unit}</div>
-                  <input type="range" min={ctrl.min} max={ctrl.max} step={ctrl.step} value={ctrl.val} onChange={(e) => handleComp(ctrl.label.toLowerCase(), e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+                  <input type="range" min={ctrl.min} max={ctrl.max} step={ctrl.step} value={ctrl.val} onChange={(e) => handleComp(ctrl.label.toLowerCase() === 'gain' ? 'makeupGain' : ctrl.label.toLowerCase(), e.target.value)} onDoubleClick={() => handleComp(ctrl.label.toLowerCase() === 'gain' ? 'makeupGain' : ctrl.label.toLowerCase(), ctrl.min + (ctrl.max - ctrl.min) / 4)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
                   <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>{ctrl.label}</div>
                 </div>
               ))}
@@ -577,18 +713,14 @@ export const FatChannel = ({ activeTab }) => {
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
           <div style={{ fontSize: '12px', fontWeight: 'bold', marginBottom: '10px' }}>Gain Envelope</div>
           <div style={{ width: '150px', height: '90px', background: '#0a0a0c', border: '1px solid #333', position: 'relative' }}>
-            <svg viewBox="0 0 100 100" style={{ width: '100%', height: '100%' }}>
-              <path d="M 45 90 L 50 20 L 55 20 L 70 90" stroke="#0984e3" strokeWidth="2" fill="rgba(9, 132, 227, 0.4)" />
-              <line x1="50" y1="0" x2="50" y2="100" stroke="#0984e3" strokeWidth="1" />
-              <line x1="55" y1="0" x2="55" y2="100" stroke="#0984e3" strokeWidth="1" />
-            </svg>
+            <EnvelopeGraph a={cAttack} h={cHold} r={cRelease} isComp={true} />
           </div>
           <button style={{ ...powerBtnOff, marginTop: '10px' }}>Auto Time</button>
           <div style={{ display: 'flex', gap: '20px', marginTop: '20px', height: '110px' }}>
             {[{ label: 'Attack', val: cAttack, min: 0, max: 120, unit: 'ms' }, { label: 'Hold', val: cHold, min: 0, max: 2000, unit: 'ms' }, { label: 'Release', val: cRelease, min: 5, max: 4000, unit: 'ms' }].map(ctrl => (
               <div key={ctrl.label} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                 <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{ctrl.val} {ctrl.unit}</div>
-                <input type="range" min={ctrl.min} max={ctrl.max} value={ctrl.val} onChange={(e) => handleComp(ctrl.label.toLowerCase(), e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+                <input type="range" min={ctrl.min} max={ctrl.max} value={ctrl.val} onChange={(e) => handleComp(ctrl.label.toLowerCase(), e.target.value)} onDoubleClick={() => handleComp(ctrl.label.toLowerCase(), ctrl.min + (ctrl.max - ctrl.min) / 4)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
                 <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>{ctrl.label}</div>
               </div>
             ))}
@@ -610,12 +742,12 @@ export const FatChannel = ({ activeTab }) => {
             <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', justifyContent: 'center' }}><button style={powerBtnOff}>Filter</button><button style={powerBtnOff}>Solo</button></div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
               <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{cType.toFixed(1)}</div>
-              <input type="range" min="1" max="10" step="0.1" value={cType} onChange={(e) => handleComp('type', e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+              <input type="range" min="1" max="10" step="0.1" value={cType} onChange={(e) => handleComp('type', e.target.value)} onDoubleClick={() => handleComp('type', 3.0)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
               <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Type</div>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
               <div style={{ fontSize: '11px', fontWeight: 'bold', marginBottom: '10px' }}>{cFreq.toFixed(1)} Hz</div>
-              <input type="range" min="20" max="20000" step="10" value={cFreq} onChange={(e) => handleComp('freq', e.target.value)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
+              <input type="range" min="20" max="20000" step="10" value={cFreq} onChange={(e) => handleComp('freq', e.target.value)} onDoubleClick={() => handleComp('freq', 990)} style={{ height: '100%', width: '20px', writingMode: 'vertical-lr', direction: 'rtl', accentColor: '#0984e3' }} />
               <div style={{ fontSize: '11px', color: '#aaa', marginTop: '5px' }}>Frequency</div>
             </div>
           </div>
@@ -661,7 +793,7 @@ export const FatChannel = ({ activeTab }) => {
               <div style={{ fontSize: '11px', marginBottom: '10px', fontWeight: 'bold' }}>Panorama</div>
               <div style={{ fontSize: '11px', marginBottom: '10px' }}>{pan}</div>
               <div style={{ width: '80px', height: '30px', background: '#111', border: '1px solid #333', position: 'relative' }}>
-                 <input type="range" min="-100" max="100" value={pan} onChange={handlePan} style={{ position: 'absolute', width: '100%', height: '100%', opacity: 0, cursor: 'grab', zIndex: 10 }} />
+                 <input type="range" min="-100" max="100" value={pan} onChange={handlePan} onDoubleClick={() => handlePan({target: {value: 0}})} style={{ position: 'absolute', width: '100%', height: '100%', opacity: 0, cursor: 'grab', zIndex: 10 }} />
                  <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none">
                    <polygon points="0,0 50,50 0,100" fill={pan < 0 ? '#0984e3' : '#333'} />
                    <polygon points="100,0 50,50 100,100" fill={pan > 0 ? '#0984e3' : '#333'} />
@@ -792,7 +924,7 @@ const headerStyle = { background: '#222', color: '#fff', padding: '5px', textAli
 const powerBtnOff = { background: '#333', color: '#888', border: '1px solid #555', borderRadius: '4px', padding: '4px 12px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' };
 const powerBtnOn = { background: '#0984e3', color: '#fff', border: '1px solid #0984e3', borderRadius: '4px', padding: '4px 12px', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' };
 const graphBox = { margin: '5px', height: '80px', background: '#0a0a0c', border: '1px solid #333', padding: '5px' };
-const iconBtn = { width: '24px', height: '24px', background: '#222', border: '1px solid #444', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#888', borderRadius: '2px', fontSize: '12px' };
+const iconBtn = { width: '24px', height: '24px', background: '#222', border: '1px solid #444', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#888', borderRadius: '2px', fontSize: '12px', cursor: 'pointer' };
 const insertBlock = { width: '30px', height: '24px', border: '1px solid #555', borderRadius: '2px', display: 'flex', alignItems: 'center', justifyContent: 'center' };
 const dcaCircle = { width: '24px', height: '24px', borderRadius: '50%', background: '#333', border: '1px solid #555', color: '#888', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' };
 const muteSquare = { width: '28px', height: '24px', borderRadius: '2px', background: '#333', border: '1px solid #555', color: '#888', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '11px', fontWeight: 'bold', cursor: 'pointer' };
